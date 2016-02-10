@@ -39,7 +39,7 @@ void setup(void)
 void printTemperature(DeviceAddress deviceAddress)
 {
   float tempC = sensors.getTempC(deviceAddress);
-  if (tempC == -127.00) {
+  if (tempC == -127,00) {
     Serial.print("bladd odcz. temp ");
      lcd.setCursor(0,1);
       lcd.print("          ");
@@ -50,33 +50,33 @@ void printTemperature(DeviceAddress deviceAddress)
     if (tempC > 84.00) {
     Serial.print("duza t ");
      lcd.setCursor(0,1);
-      lcd.print("          ");
+      lcd.print("             ");
         lcd.setCursor(0,1); 
     lcd.print("muzg przegrz"); 
-    
+    lcd.print(tempC);
   } else {
-     if (26.00 > tempC > 28.00) {
+    if (26.00 < tempC < 28.00) {
     Serial.print("zacz ");
      lcd.setCursor(0,1);
       lcd.print("          ");
         lcd.setCursor(0,1); 
-    lcd.print("muzg grzeje") ; 
-      
+    lcd.print("muzg grze") ; 
+      lcd.print(tempC);
       } else {
-     if (29.00 > tempC > 32.00) {
+     if (29.00 < tempC < 30.00) {
    // Serial.print("zacz ");
      lcd.setCursor(0,1);
-      lcd.print("          ");
+      lcd.print("              ");
         lcd.setCursor(0,1); 
     lcd.print("muzg wybuchnie"); 
-    
+    lcd.print(tempC);
     
    } else {
     
      // Serial.print("C: ");
     Serial.print(tempC);
      lcd.setCursor(0,1);
-      lcd.print("          ");
+      lcd.print("             ");
         lcd.setCursor(0,1); 
     lcd.print(tempC);
     //Serial.print(" F: ");
