@@ -1,0 +1,546 @@
+//#include <AvCrystal.h>
+#include <EEPROM.h>
+#include <Wire.h>  // Comes with Arduino IDE
+#include <LiquidCrystal_I2C.h>
+#include <OneWire.h>
+LiquidCrystal_I2C lcd(0x38, 4, 5, 6, 0, 1, 2, 3, 7, POSITIVE);
+#define SW_COOL        2    // The 'Cool' switch is connected here
+#define SW_HEAT        3    // The 'Heat' switch is connected here
+#define SW_FAN         4   // The 'Fan' switch is connected here
+#define BUT_UP         5   // The 'Up' button
+#define BUT_DOWN       6   // The 'Down' button
+
+#define RLY_COOL       7   // The relay to actuate 'Cool'
+#define RLY_HEAT       8   // The relay to actuate 'Heat'
+#define RLY_FAN        9   // The relay to actuate 'Fan'
+
+#define MIN_TIME      60000  // How long in ms between cycles.
+                    // To prevent compressor problems, we never cycle the unit on and off quicker than this interval.
+
+#define TEMPR_STORE   500 // Where in the EEPROM we store the set temperature
+
+// LCD
+// AvCrystal is a modified version of the LiquidCrystal LCD library
+// The constructor syntax is:
+// AvCrystal(rs, rw, enable, d4, d5, d6, d7)
+#include "Arduino.h"
+void setup();
+void loop();
+void checkSystem();
+void goCycle(byte set_cool, byte set_heat);
+void checkButtons();
+void pressButton(int n);
+void saveTemp();
+void updateDisplay();
+void outputStatus();
+void checkSerial();
+void serSetTemp();
+void serSetFan();
+
+//AvCrystal lcd(12, 11, 10, 5, 4, 3, 2);
+byte hasReset = 0;
+long lastUpdate = 0;
+
+float currTemp = 0;     // The currently read temperature
+float setTemp = 0;      // The set temperature
+long tReadStarted = 0;  // When the temperature read started
+float readTotal = 0;  // All of the readings added up
+int readCount = 0;    // How many readings we have made
+
+// Buttons
+byte lastButton[3];   // Track the button states
+byte buttonPins[3];   // Which pins the buttons are on
+long lastPress = 0;     // When the last button was pressed
+
+// HVAC STUFF
+byte hvac_mode = 0;     // Master HVAC Status: 0 = off, 1 = heat, 2 = cool
+byte is_heating = 0;    // Are we heating?
+byte is_cooling = 0;    // Are we cooling?
+long lastCycle = 0;     // When was the heat/cool last switched on or off?
+byte fan_mode = 0;    // Is the FAN on?
+byte last_fan = 0;    // Last FAN status.
+int cycle_wait = -1;    // Time before next cycle begins (visual countdown on LCD)
+
+// Serial port
+long lastOutput = 0;    // We output to the serial port once a second.
+byte serBuf[10];      // Input buffer
+byte serPos = 0;      // Where we are in the input buffer
+
+void setup()
+{
+  // Set all the pins
+  pinMode(SW_COOL, INPUT);
+  pinMode(SW_HEAT, INPUT);
+  pinMode(SW_FAN, INPUT);
+  pinMode(BUT_UP, INPUT);
+  pinMode(BUT_DOWN, INPUT);
+
+  pinMode(RLY_COOL, OUTPUT);
+  pinMode(RLY_HEAT, OUTPUT);
+  pinMode(RLY_FAN, OUTPUT);
+   lcd.begin(16,2);
+    lcd.backlight(); 
+  lcd.clear();
+  lcd.setCursor(0,0);
+  // Default temperature is 27.5 C
+  setTemp = 27.5;
+
+  // See if we can read the set temperature out of the EEPROM
+  byte gTemp = EEPROM.read(TEMPR_STORE);
+  if (gTemp > 0) setTemp = (float)gTemp / 2; // Temperature is stored doubled
+
+  // Give the LCD time to power up
+  delay(60);
+
+  // Clear and reset the LCD
+ // lcd.reset();
+  lcd.print("loading...");
+
+  // Open the Serial port
+  Serial.begin(9600);
+
+  // Pins of the buttons
+  buttonPins[0] = BUT_UP;
+  buttonPins[1] = BUT_DOWN;
+  buttonPins[2] = SW_FAN;
+
+  lcd.clear();
+}
+
+void loop()
+{
+  // Is it time to do a temperature reading? We do one every second.
+  if (millis() - tReadStarted >= 1000 || millis() < tReadStarted)
+  {
+     // Reset the LCD after 1 second to fix problems.
+ /*   if (hasReset == 0) {
+      hasReset = 1;
+      lcd.reset();
+    } */
+
+    tReadStarted = millis();
+
+    // Read the temperature from the analog pin
+    float inRead = analogRead(2) * 100 * 5;
+    inRead = inRead / 1023;
+
+   // Add to the read count
+    readTotal += inRead;
+    readCount++;
+
+    // Average out 9 readings to fix analog flicker problems.
+    if (currTemp == 0 || readCount > 8)
+    {
+      currTemp = readTotal / readCount;
+      readCount = 0;
+      readTotal = 0;
+    }
+  }
+
+  if (millis() - lastUpdate > 250 || millis() < lastUpdate)
+  {
+    // Check if we need to heat or cool
+    checkSystem();
+
+    // Update the display every 250 milleseconds
+    updateDisplay();
+  }
+
+  // Output the current status once a second.
+  if (millis() - lastOutput > 1000 || millis() < lastOutput)
+  {
+    lastOutput = millis();
+    outputStatus();
+  }
+
+
+  // Check the button state
+  checkButtons();
+
+  // Check serial port
+  if (Serial.available() > 0) {
+    checkSerial();
+  }
+
+}
+
+void checkSystem()
+{
+
+  // Check the cool and heat pins
+  if (digitalRead(SW_COOL) == HIGH) {
+    hvac_mode = 2;
+  }
+  else if (digitalRead(SW_HEAT) == HIGH) {
+    hvac_mode = 1;
+  }
+  else {
+    hvac_mode = 0;
+  }
+
+
+  // See if it's time to heat or cool.
+  if (hvac_mode == 2) // Cool
+  {
+    // Are we already cooling?
+    if (is_cooling == 0)
+    {
+      // In order for 'Cool' to be activated, the temperature needs rise at least 1C above the set temperature.
+      if (currTemp >= setTemp + 1)
+      {
+        // Start cooling.
+        goCycle(1, 0);
+      }
+      else {
+        cycle_wait = -1;
+      }
+    }
+    else {
+      // To deactivate cooling, the temperature has to reach 0.5 C below the set temperature.
+      if (currTemp <= setTemp - 0.5)
+      {
+        // Shut off the cooling.
+        goCycle(0, 0);
+      }
+      else {
+        cycle_wait = -1;
+      }
+    }
+  }
+  else if (hvac_mode == 1) // Heat
+  {
+    // Are we already heating?
+    if (is_heating == 0)
+    {
+      // In order for 'Heat' to be activated, the temperature needs drop 1C below the set temperature.
+      if (currTemp <= setTemp - 1)
+      {
+        // Start heating.
+        goCycle(0, 1);
+      }
+      else {
+        cycle_wait = -1;
+      }
+    }
+    else {
+      // To deactivate heating, the temperature has to reach 0.5 C above the set temperature.
+      if (currTemp >= setTemp + 0.5)
+      {
+        // Shut off the heating.
+        goCycle(0, 0);
+      }
+      else {
+        cycle_wait = -1;
+      }
+    }
+
+
+  }
+  else {
+    // Make sure the heat/cool relays are off.
+    is_heating = 0;
+    is_cooling = 0;
+    cycle_wait = -1;
+  }
+
+  // Apply the settings.
+  if (hvac_mode == 2)
+  {
+    digitalWrite(RLY_COOL, is_cooling ? HIGH : LOW);
+    digitalWrite(RLY_HEAT, LOW);
+  }
+  else if (hvac_mode == 1) {
+    digitalWrite(RLY_HEAT, is_heating ? HIGH : LOW);
+    digitalWrite(RLY_COOL, LOW);
+  }
+  else {
+    digitalWrite(RLY_HEAT, LOW);
+    digitalWrite(RLY_COOL, LOW);
+  }
+
+  // Fan relay on when cooling
+  digitalWrite(RLY_FAN, fan_mode == 1 || is_cooling == 1 ? HIGH : LOW);
+
+}
+
+void goCycle(byte set_cool, byte set_heat)
+{
+  // Set the heat / cool if we can.
+  // Make sure we do not go over the cyle problems.
+  if (millis() - lastCycle > MIN_TIME || millis() < lastCycle)
+  {
+    lastCycle = millis();
+    is_heating = set_heat;
+    is_cooling = set_cool;
+    cycle_wait = -1;
+  }
+  else {
+    // Yes, it's too early. Show the user how long before the cycle will be applied.
+    cycle_wait = (MIN_TIME - (millis() - lastCycle)) / 1000;
+  }
+}
+
+void checkButtons()
+{
+  int butState = 0;
+  byte butS = 0;
+
+  // Check the button status of all three buttons.
+  for (int i = 0; i <= 2; i++)
+  {
+    butState = digitalRead(buttonPins[i]);
+    butS = butState == HIGH ? 1 : 0;
+    if (butS != lastButton[i])
+    {
+      lastButton[i] = butS;
+      if (butS && (millis() - lastPress > 250 || millis() < lastPress))
+      {
+        pressButton(i);
+      }
+    }
+
+    // Are the buttons repeating? (Is the button being held down?)
+    if (butS == 1 && millis() - lastPress > 250 && i != 2)
+    {
+      // Repeat
+      pressButton(i);
+    }
+  }
+
+}
+
+void pressButton(int n)
+{
+  lastPress = millis();
+  switch (n)
+  {
+  case 0: // Button 0 was pressed.
+    // Increase temp.
+    setTemp += 0.5;
+    updateDisplay();
+
+    // Make sure the temperature is not too high.
+    if (setTemp > 40) setTemp = 40;
+    saveTemp();
+
+    break;
+  case 1: // Button 1 was pressed.
+
+    // Decrease temp.
+    setTemp -= 0.5;
+    if (setTemp < 10) setTemp = 10;
+    updateDisplay();
+    saveTemp();
+
+    break;
+  case 2: // Button 2 was pressed.
+    fan_mode = 1 - fan_mode;
+    break;
+  }
+
+}
+
+void saveTemp()
+{
+  // Save the temperature into the EEPROM
+  byte gTemp = setTemp * 2;
+  EEPROM.write(TEMPR_STORE, gTemp);
+}
+
+void updateDisplay()
+{
+  // Update the LCD display.
+
+  lastUpdate = millis();
+  lcd.home();
+
+  lcd.print("Now ");
+  lcd.print(currTemp);
+//  lcd.print(0xDF, BYTE); // Degree symbol
+  lcd.print("  ");
+
+  lcd.setCursor(0, 1);
+
+  lcd.print("Set ");
+  lcd.print(setTemp);
+//  lcd.print(0xDF, BYTE); // Degree symbol
+  lcd.print("  ");
+
+  lcd.setCursor(12, 0);
+  if (hvac_mode == 0) lcd.print("OFF ");
+  if (hvac_mode == 1) lcd.print("HEAT");
+  if (hvac_mode == 2) lcd.print("COOL");
+
+  lcd.setCursor(16, 0);
+  if (hvac_mode == 0 || (hvac_mode == 1 && is_heating == 0) || (hvac_mode == 2 && is_cooling == 0)) {
+    if (cycle_wait > -1) {
+      lcd.print(" ");
+      lcd.print(cycle_wait);
+      lcd.print(" ");
+    }
+    else {
+      lcd.print("   "); // Blank out where it would say "on"
+    }
+  }
+  else if ((hvac_mode == 1 && is_heating == 1) || (hvac_mode == 2 && is_cooling)) {
+      // Show the cycle time.
+    if (cycle_wait > -1) {
+//      lcd.print(0x7E, BYTE);
+      lcd.print(cycle_wait);
+      lcd.print(" ");
+    }
+    else {
+      lcd.print(" ON");
+    }
+  }
+
+  lcd.setCursor(12, 1);
+  lcd.print("FAN ");
+  if (fan_mode == 1) lcd.print("ON  ");
+  if (fan_mode == 0) lcd.print("AUTO");
+}
+
+void outputStatus()
+{
+  // Status information in XML format on the Serial port.
+  // <Status Temp="18" Set="20" Mode="Heat" Active="1" Fan="On" />
+
+  Serial.print("<Status ");
+  Serial.print("Temp=\"");
+  Serial.print(currTemp);
+  Serial.print("\" Set=\"");
+  Serial.print(setTemp);
+  Serial.print("\" Mode=\"");
+  if (hvac_mode == 2){
+    Serial.print("Cool");
+  }
+  else if (hvac_mode == 1) {
+    Serial.print("Heat");
+  }
+  else {
+    Serial.print("Off");
+  }
+  Serial.print("\" Active=\"");
+  Serial.print(is_cooling || is_heating ? 1 : 0);
+  Serial.print("\" Fan=\"");
+  if (fan_mode == 1) Serial.print("On");
+  else Serial.print("Auto");
+  Serial.println("\" />");
+}
+
+void checkSerial()
+{
+  // To control the thermostat via computer, send simple messages on the serial port.
+  // The following messages are understood:
+  // S(number)(enter) - Set temperature to this.
+  // F(1 or 0)(enter) - Set the fan on or off.
+
+
+  while (Serial.available() > 0)
+  {
+    byte ib = Serial.read();
+
+    // Is this character the end of a message? (Character 13, newline)
+    if (ib == 13)
+    {
+
+      // Try to understand the message.
+      switch (serBuf[0])
+      {
+      case 'S':
+        serSetTemp();
+        break;
+      case 'F':
+        serSetFan();
+        break;
+      }
+    }
+    else {
+      // Is this character the start of a new message?
+      if (ib == 'S' || ib == 'F') {
+        // Start the buffer at 0.
+        serPos = 0;
+      }
+
+      // Add to the buffer.
+      if (serPos < 10)
+      {
+        serBuf[serPos] = ib;
+        serPos++;
+      }
+    }
+  }
+}
+
+void serSetTemp()
+{
+  float frTemp = 0;
+  float brTemp = 0;
+  float bDiv = 10;
+  byte beforeDecimal = 1; // Are we before or after the decimal?
+
+  // Read a temperature out of the serial buffer.
+  for (byte i = 1; i <= serPos - 1; i++)
+  {
+    switch (serBuf[i])
+    {
+    case '.':
+      beforeDecimal = 0;
+      break;
+    default:
+      if (beforeDecimal == 1)
+      {
+        // Multiply our work number by 10
+        frTemp *= 10;
+        // Add this number
+        // Make sure it's a number
+        if (serBuf[i] >= '0' && serBuf[i] <= '9')
+        {
+          frTemp += serBuf[i] - '0';  // Turn from a byte to a number
+        }
+      }
+      else {
+        // Numbers after the decimal are divided by 10 more each time
+        brTemp += (float)(serBuf[i] - '0') / bDiv;
+        bDiv *= 10;
+      }
+    }
+  }
+
+  frTemp += brTemp;
+
+  // Set the temperature.
+  if (frTemp >= 10 && frTemp <= 40) setTemp = frTemp;
+  saveTemp();
+
+}
+
+void serSetFan()
+{
+  // Set the fan status to on or off.
+  switch (serBuf[1])
+  {
+  case '1':
+    fan_mode = 1;
+    break;
+  case '0':
+    fan_mode = 0;
+    break;
+  }
+}
+
+int main(void)
+{
+  init();
+
+  setup();
+
+  for (;;)
+    loop();
+
+  return 0;
+}
+
+
+  
+  
