@@ -137,6 +137,8 @@ if (keypressed != NO_KEY)
    sensors.requestTemperatures();
   float piec =  sensors.getTempC(termpiec);
   float bojl =  sensors.getTempC(termbojl);
+  float dodaj = usttemp+3;  
+  float minus = usttemp-3; 
   ////////////////////////
     if (piec == -127,00) {
    digitalWrite(GORA, HIGH);
@@ -158,13 +160,16 @@ if (keypressed != NO_KEY)
       digitalWrite(GORA, HIGH);
   }
   else     
-  if (piec > usttemp+3)
+  
+  if (piec > dodaj)
 {
    digitalWrite(GORA, LOW);
    //digitalWrite(DOL, LOW);
 
 }
-    if (piec < usttemp-3)
+//  float dodaj = usttemp+3;  
+    
+    if (piec < minus)
 {
    digitalWrite(GORA, HIGH);
   // digitalWrite(DOL, HIGH);
